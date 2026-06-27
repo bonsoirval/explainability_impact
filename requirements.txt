@@ -10,3 +10,4 @@ matplotlib>=3.5.0
 pillow>=9.0.0
 scikit-image>=0.19.0
 tqdm>=4.64.0
+kaggle>=1.6.0

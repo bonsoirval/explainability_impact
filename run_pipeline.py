@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 
 # Import CRISP-DM phases modules
-from phase_2_data_understanding.download_dataset import setup_mock_dataset
+from phase_2_data_understanding.download_dataset import setup_mock_dataset, download_real
 from phase_3_data_preparation.preprocess import get_dataloaders
 from phase_4_modeling.train import get_lightweight_model, train_model
 from phase_5_evaluation.explainers import ExplainabilitySuite
@@ -23,6 +23,12 @@ def main():
     parser.add_argument("--methods", type=str, nargs="+", default=["Saliency", "Grad-CAM", "LIME", "SHAP"],
                         choices=["Saliency", "Grad-CAM", "LIME", "SHAP"],
                         help="List of XAI methods to run/benchmark. E.g. --methods Saliency Grad-CAM")
+    parser.add_argument("--dataset_mode", type=str, default="mock", choices=["mock", "real"],
+                        help="'mock' uses synthetic images; 'real' downloads from Kaggle (requires ~/.kaggle/kaggle.json).")
+    parser.add_argument("--crop", type=str, default="Tomato",
+                        help="Crop to filter when --dataset_mode real (e.g. Tomato, Potato, Corn).")
+    parser.add_argument("--kaggle_slug", type=str, default="abdallahalidev/plantvillage-dataset",
+                        help="Kaggle dataset slug to download when --dataset_mode real.")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -30,7 +36,10 @@ def main():
 
     # PHASE 2: Data Understanding / Ingestion
     print("\n[PHASE 2] Data Understanding (Setting up dataset)...")
-    setup_mock_dataset(base_dir=args.dataset_path, num_samples_per_class=12)
+    if args.dataset_mode == "real":
+        download_real(dest=args.dataset_path, crop=args.crop, kaggle_slug=args.kaggle_slug)
+    else:
+        setup_mock_dataset(base_dir=args.dataset_path, num_samples_per_class=12)
 
     # PHASE 3: Data Preparation
     print("\n[PHASE 3] Data Preparation (Splitting & preprocessing)...")
