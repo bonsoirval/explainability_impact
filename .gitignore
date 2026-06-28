@@ -2,4 +2,5 @@ crisp-dm/
 data/
 image/
 venv/
+env/
 tutorials/
