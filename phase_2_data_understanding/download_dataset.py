@@ -1,30 +1,34 @@
 """
 phase_2_data_understanding/download_dataset.py
 -----------------------------------------------
-Supports two download modes:
+Downloads **only the real Tomato images** from the PlantVillage dataset
+on Kaggle (abdallahalidev/plantvillage-dataset) and copies them into a
+local destination directory.
 
-  1. REAL  — Downloads the full PlantVillage dataset from Kaggle
-             (abdallahalidev/plantvillage-dataset) and filters it to
-             only keep a chosen crop's folders (default: Tomato).
-
-  2. MOCK  — Generates tiny synthetic leaf images for quick pipeline
-             testing without any credentials or internet access.
+The Kaggle zip unpacks as:
+    plantvillage dataset/
+        color/           <- RGB originals   <- we use this by default
+            Tomato___Bacterial_spot/
+            Tomato___Early_blight/
+            ...
+        segmented/
+        grayscale/
 
 CLI usage
 ---------
-    # Real dataset, tomato leaves only (requires Kaggle credentials):
-    python -m phase_2_data_understanding.download_dataset \
-        --mode real --crop Tomato --dest data/PlantVillage
+    # Requires a valid ~/.kaggle/kaggle.json token:
+    python -m phase_2_data_understanding.download_dataset
 
-    # Mock dataset (default, no credentials needed):
-    python -m phase_2_data_understanding.download_dataset --mode mock
+    # Custom destination or image variant:
+    python -m phase_2_data_understanding.download_dataset \\
+        --dest data/PlantVillage --image_type color
 
 Kaggle credentials
 ------------------
-Create a token at https://www.kaggle.com/settings → API → "Create New Token".
+Create a token at https://www.kaggle.com/settings -> API -> "Create New Token".
 Place the downloaded kaggle.json at  ~/.kaggle/kaggle.json  (chmod 600).
-In Colab, upload it via the file browser or run:
 
+In Google Colab:
     from google.colab import files
     files.upload()               # select kaggle.json
     !mkdir -p ~/.kaggle
@@ -35,39 +39,45 @@ In Colab, upload it via the file browser or run:
 import os
 import shutil
 import argparse
-from PIL import Image, ImageDraw
 
 
-# ── Tomato class names present in abdallahalidev/plantvillage-dataset ────────
+# ── Exact Tomato class folder names in abdallahalidev/plantvillage-dataset ────
 TOMATO_CLASSES = [
     "Tomato___Bacterial_spot",
     "Tomato___Early_blight",
     "Tomato___Late_blight",
-    "Tomato___Leaf_Miner",
-    "Tomato___Mosaic_virus",
+    "Tomato___Leaf_Mold",
     "Tomato___Septoria_leaf_spot",
-    "Tomato___Spider_mites Two-spotted_spider_mite",
+    "Tomato___Spider_mites_two-spotted_spider_mite",
     "Tomato___Target_Spot",
+    "Tomato___Tomato_mosaic_virus",
     "Tomato___Tomato_Yellow_Leaf_Curl_Virus",
     "Tomato___healthy",
 ]
+
+# Kaggle dataset slug for PlantVillage
+DEFAULT_KAGGLE_SLUG = "abdallahalidev/plantvillage-dataset"
 
 
 # ── Real download ─────────────────────────────────────────────────────────────
 def download_real(
     dest: str = "data/PlantVillage",
+    kaggle_slug: str = DEFAULT_KAGGLE_SLUG,
+    image_type: str = "color",
     crop: str = "Tomato",
-    kaggle_slug: str = "abdallahalidev/plantvillage-dataset",
 ) -> None:
     """
-    Downloads PlantVillage from Kaggle and copies only the folders whose
-    names start with ``crop`` (case-insensitive) into ``dest``.
+    Downloads the PlantVillage dataset from Kaggle, locates the
+    ``image_type`` subfolder (color | segmented | grayscale), then copies
+    only the folders matching ``crop`` into ``dest``.
 
     Parameters
     ----------
-    dest        : Target directory (will be created if needed).
-    crop        : Crop prefix to keep, e.g. "Tomato", "Potato", "Corn".
+    dest        : Target directory (created if needed).
     kaggle_slug : Kaggle dataset identifier (owner/dataset-name).
+    image_type  : Which image variant to use ('color', 'segmented', or
+                  'grayscale').  Defaults to 'color'.
+    crop        : Crop name prefix to filter (default 'Tomato').
     """
     try:
         from kaggle.api.kaggle_api_extended import KaggleApi
@@ -76,109 +86,111 @@ def download_real(
             "kaggle package not found.  Install it with:  pip install kaggle"
         )
 
-    print(f"Authenticating with Kaggle API...")
+    print("Authenticating with Kaggle API...")
     api = KaggleApi()
     api.authenticate()
 
-    # Download to a temp staging dir so we don't pollute dest on failure
+    # Stage to a temp dir so dest stays clean on failure
     raw_dir = os.path.join("data", "_plantvillage_raw")
     os.makedirs(raw_dir, exist_ok=True)
 
-    print(f"Downloading '{kaggle_slug}' → {raw_dir}  (this may take a few minutes)...")
+    print(
+        f"Downloading '{kaggle_slug}' -> {raw_dir}  "
+        "(this may take several minutes -- the full zip is ~4 GB)..."
+    )
     api.dataset_download_files(kaggle_slug, path=raw_dir, unzip=True)
-    print("Download complete.")
+    print("Download complete.\n")
 
-    # The zip unpacks as:  raw_dir/plantvillage dataset (color)/  (or similar)
-    # Walk to find the deepest folder that contains class subdirs
-    extracted_root = _find_image_root(raw_dir, crop)
-    if extracted_root is None:
+    # ── Locate the chosen image-type subfolder ────────────────────────────────
+    # Expected layout after extraction:
+    #   raw_dir/
+    #     plantvillage dataset/          <- top-level dir name (has a space)
+    #       color/
+    #         Tomato___Bacterial_spot/   <- class folders
+    #         ...
+    #       segmented/
+    #       grayscale/
+    image_root = _find_image_type_root(raw_dir, image_type, crop)
+    if image_root is None:
         raise FileNotFoundError(
-            f"Could not find any '{crop}' folders inside {raw_dir}.  "
-            f"Check that the Kaggle slug '{kaggle_slug}' is correct."
+            f"Could not find a '{image_type}' subfolder containing '{crop}' "
+            f"class folders inside {raw_dir}.\n"
+            "Check that the Kaggle slug is correct and extraction succeeded."
         )
 
-    print(f"Found dataset root: {extracted_root}")
-    _copy_crop_folders(extracted_root, dest, crop)
-    print(f"\n✅  Done!  Tomato leaf folders copied to: {dest}")
+    print(f"Using image folder: {image_root}")
+    _copy_crop_folders(image_root, dest, crop)
+    print(f"\n[OK] {crop} leaf folders copied to: {dest}")
     _print_summary(dest)
 
 
-def _find_image_root(base: str, crop: str) -> str | None:
+def _find_image_type_root(base: str, image_type: str, crop: str) -> str | None:
     """
-    Walk the extracted directory tree and return the first directory that
-    contains at least one sub-folder whose name starts with ``crop``.
+    Walk the extracted tree and return the path of the first directory whose
+    name matches ``image_type`` (case-insensitive) and that contains at
+    least one class folder whose name starts with ``crop``.
+
+    Falls back to any directory directly containing crop-prefixed subfolders
+    if the named subfolder is not found.
     """
+    image_type_lower = image_type.lower()
     crop_lower = crop.lower()
+    fallback = None
+
     for dirpath, dirnames, _ in os.walk(base):
-        if any(d.lower().startswith(crop_lower) for d in dirnames):
+        has_crop = any(d.lower().startswith(crop_lower) for d in dirnames)
+        if os.path.basename(dirpath).lower() == image_type_lower and has_crop:
             return dirpath
-    return None
+        if has_crop and fallback is None:
+            fallback = dirpath
+
+    return fallback
 
 
-def _copy_crop_folders(src_root: str, dest: str, crop: str) -> None:
-    """Copy only folders matching ``crop`` from src_root into dest."""
+def _copy_crop_folders(src_root: str, dest: str, crop: str = "Tomato") -> None:
+    """
+    Copy only the class folders matching ``crop`` from ``src_root`` into
+    ``dest``.  Skips folders that already exist (allows safe resume).
+    """
     crop_lower = crop.lower()
     os.makedirs(dest, exist_ok=True)
     copied = 0
+    skipped = 0
+
     for folder in sorted(os.listdir(src_root)):
         if not folder.lower().startswith(crop_lower):
             continue
-        src_path  = os.path.join(src_root, folder)
+        src_path = os.path.join(src_root, folder)
         dest_path = os.path.join(dest, folder)
+
         if not os.path.isdir(src_path):
             continue
+
         if os.path.exists(dest_path):
-            print(f"  Skipping (already exists): {folder}")
+            n = sum(
+                1 for f in os.listdir(dest_path)
+                if f.lower().endswith((".jpg", ".jpeg", ".png"))
+            )
+            print(f"  Skipping (already exists, {n} images): {folder}")
+            skipped += 1
             continue
-        print(f"  Copying: {folder}  ({len(os.listdir(src_path))} images)")
+
+        n_imgs = len([
+            f for f in os.listdir(src_path)
+            if f.lower().endswith((".jpg", ".jpeg", ".png"))
+        ])
+        print(f"  Copying: {folder}  ({n_imgs} images)")
         shutil.copytree(src_path, dest_path)
         copied += 1
-    print(f"\nCopied {copied} class folder(s) to {dest}")
 
-
-# ── Mock dataset ──────────────────────────────────────────────────────────────
-def setup_mock_dataset(
-    base_dir: str = "data/PlantVillage",
-    num_samples_per_class: int = 12,
-) -> None:
-    """
-    Creates tiny synthetic JPEG leaf images for pipeline smoke-testing.
-    No internet or Kaggle credentials required.
-    """
-    classes = ["Tomato___healthy", "Tomato___Early_blight", "Tomato___Late_blight"]
-    os.makedirs(base_dir, exist_ok=True)
-
-    print(f"Setting up mock dataset in {base_dir}...")
-    for class_name in classes:
-        class_path = os.path.join(base_dir, class_name)
-        os.makedirs(class_path, exist_ok=True)
-
-        for i in range(num_samples_per_class):
-            img_path = os.path.join(class_path, f"leaf_{i}.jpg")
-            if os.path.exists(img_path):
-                continue
-
-            img  = Image.new("RGB", (256, 256), color=(101, 67, 33))
-            draw = ImageDraw.Draw(img)
-            draw.ellipse([50, 50, 206, 206], fill=(34, 139, 34))
-
-            if class_name == "Tomato___Early_blight":
-                draw.ellipse([80,  80,  100, 100], fill=(139, 69, 19))
-                draw.ellipse([130, 120, 150, 140], fill=(139, 69, 19))
-            elif class_name == "Tomato___Late_blight":
-                draw.ellipse([70,  70,  110, 110], fill=(80, 50, 20))
-                draw.ellipse([110, 140, 160, 190], fill=(80, 50, 20))
-
-            img.save(img_path, "JPEG")
-
-    print("Mock dataset setup complete.")
+    print(f"\nCopied {copied} class folder(s), skipped {skipped} already-present.")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _print_summary(dest: str) -> None:
     """Print a class-by-class image count table."""
-    print(f"\n{'Class':<55} {'Images':>6}")
-    print("-" * 63)
+    print(f"\n{'Class':<60} {'Images':>6}")
+    print("-" * 68)
     total = 0
     for cls in sorted(os.listdir(dest)):
         cls_dir = os.path.join(dest, cls)
@@ -188,40 +200,47 @@ def _print_summary(dest: str) -> None:
             1 for f in os.listdir(cls_dir)
             if f.lower().endswith((".jpg", ".jpeg", ".png"))
         )
-        print(f"  {cls:<53} {n:>6}")
+        print(f"  {cls:<58} {n:>6}")
         total += n
-    print("-" * 63)
-    print(f"  {'TOTAL':<53} {total:>6}\n")
+    print("-" * 68)
+    print(f"  {'TOTAL':<58} {total:>6}\n")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Download or mock the PlantVillage dataset."
-    )
-    parser.add_argument(
-        "--mode", choices=["real", "mock"], default="mock",
-        help="'real' requires Kaggle credentials; 'mock' is always available."
-    )
-    parser.add_argument(
-        "--crop", default="Tomato",
-        help="Crop to filter when mode=real (e.g. Tomato, Potato, Corn)."
+        description=(
+            "Download the real PlantVillage Tomato dataset from Kaggle.\n"
+            "Requires a valid ~/.kaggle/kaggle.json API token.\n\n"
+            "Get your token at: "
+            "https://www.kaggle.com/settings -> API -> Create New Token"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--dest", default="data/PlantVillage",
-        help="Destination directory for the dataset."
+        help="Destination directory for the class folders. "
+             "(default: data/PlantVillage)"
     )
     parser.add_argument(
-        "--kaggle_slug", default="abdallahalidev/plantvillage-dataset",
-        help="Kaggle dataset slug (owner/dataset-name)."
+        "--kaggle_slug", default=DEFAULT_KAGGLE_SLUG,
+        help=f"Kaggle dataset slug (owner/dataset-name). "
+             f"(default: {DEFAULT_KAGGLE_SLUG})"
     )
     parser.add_argument(
-        "--mock_samples", type=int, default=12,
-        help="Images per class when mode=mock."
+        "--image_type", default="color",
+        choices=["color", "segmented", "grayscale"],
+        help="Image variant to use from the zip. (default: color)"
+    )
+    parser.add_argument(
+        "--crop", default="Tomato",
+        help="Crop prefix to filter class folders. (default: Tomato)"
     )
     args = parser.parse_args()
 
-    if args.mode == "real":
-        download_real(dest=args.dest, crop=args.crop, kaggle_slug=args.kaggle_slug)
-    else:
-        setup_mock_dataset(base_dir=args.dest, num_samples_per_class=args.mock_samples)
+    download_real(
+        dest=args.dest,
+        kaggle_slug=args.kaggle_slug,
+        image_type=args.image_type,
+        crop=args.crop,
+    )

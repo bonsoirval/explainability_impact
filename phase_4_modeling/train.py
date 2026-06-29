@@ -31,6 +31,13 @@ def get_lightweight_model(model_name: str, num_classes: int, pretrained: bool = 
 def train_model(model, train_loader, val_loader, num_epochs=3, lr=0.001, device="cpu", save_dir="phase_4_modeling/models", model_name="model"):
     """
     Standard training/validation loop.
+
+    Returns
+    -------
+    model         : Trained model (best checkpoint loaded).
+    save_path     : Path to the saved best checkpoint.
+    history       : Dict with keys train_loss, train_acc, val_loss, val_acc
+                    each containing a list of per-epoch float values.
     """
     model = model.to(device)
     criterion = nn.CrossEntropyLoss()
@@ -39,6 +46,8 @@ def train_model(model, train_loader, val_loader, num_epochs=3, lr=0.001, device=
     best_acc = 0.0
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, f"{model_name}_best.pth")
+
+    history = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
     
     for epoch in range(num_epochs):
         print(f"\nEpoch {epoch+1}/{num_epochs}")
@@ -66,6 +75,9 @@ def train_model(model, train_loader, val_loader, num_epochs=3, lr=0.001, device=
         epoch_loss = running_loss / len(train_loader.dataset)
         epoch_acc = running_corrects.double() / len(train_loader.dataset)
         print(f"Train Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f}")
+
+        history["train_loss"].append(epoch_loss)
+        history["train_acc"].append(float(epoch_acc))
         
         # Val
         model.eval()
@@ -86,10 +98,13 @@ def train_model(model, train_loader, val_loader, num_epochs=3, lr=0.001, device=
         val_loss = val_loss / len(val_loader.dataset)
         val_acc = val_corrects.double() / len(val_loader.dataset)
         print(f"Val Loss: {val_loss:.4f} Acc: {val_acc:.4f}")
+
+        history["val_loss"].append(val_loss)
+        history["val_acc"].append(float(val_acc))
         
         if val_acc >= best_acc:
             best_acc = val_acc
             torch.save(model.state_dict(), save_path)
             print(f"Checkpoint saved -> {save_path}")
             
-    return model, save_path
+    return model, save_path, history

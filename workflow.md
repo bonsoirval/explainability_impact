@@ -29,3 +29,7 @@ python run_pipeline.py --model shufflenet_v2 --dataset_path data/PlantVillage --
 Combine the results of both models and write your analysis comparing:
 * **Computational Cost vs. Visual Faithfulness:** Does the fast Vanilla Saliency Map or Grad-CAM localize the leaf disease spots as accurately as the computationally heavy SHAP or LIME?
 * **Resource Bounds:** Determine if LIME or SHAP can physically fit on an edge node with low RAM (e.g., $<512\text{ MB}$), or if you must resort to lightweight options like Vanilla Saliency and Grad-CAM.cd 
+
+
+### **How to Run run_pipeline.py**
+python run_pipeline.py --model mobilenet_v3 --epochs 5 --runs 10
