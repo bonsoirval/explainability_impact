@@ -3,6 +3,9 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+import matplotlib.ticker as mticker
+from matplotlib.patches import FancyBboxPatch
+from sklearn.metrics import precision_recall_fscore_support
 
 # ── Shared colour palette (matches plot_from_csv.py) ─────────────────────────
 METHOD_COLORS = {
@@ -537,3 +540,380 @@ def plot_confidence_bar(model, input_tensor, class_names: list, device, save_pat
     plt.tight_layout()
     _save(fig, save_path)
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# THESIS-QUALITY PLOTS  (Phase 2 → 5)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_dataset_distribution(root_dir: str, save_path: str) -> None:
+    """
+    Horizontal bar chart of per-class image counts in the dataset.
+    Reveals class imbalance — a critical data-understanding check for a thesis.
+    """
+    class_counts = {}
+    for cls in sorted(os.listdir(root_dir)):
+        cls_dir = os.path.join(root_dir, cls)
+        if not os.path.isdir(cls_dir):
+            continue
+        n = sum(1 for f in os.listdir(cls_dir)
+                if f.lower().endswith((".jpg", ".jpeg", ".png")))
+        if n > 0:
+            short = cls.replace("Tomato___", "").replace("_", " ")
+            class_counts[short] = n
+
+    if not class_counts:
+        print(f"  [skip] No images found in {root_dir}")
+        return
+
+    labels = list(class_counts.keys())
+    counts = list(class_counts.values())
+    order  = np.argsort(counts)
+    labels = [labels[i] for i in order]
+    counts = [counts[i] for i in order]
+    total  = sum(counts)
+    cmap   = plt.cm.get_cmap("tab10", len(labels))
+    colors = [cmap(i) for i in range(len(labels))]
+
+    fig, ax = plt.subplots(figsize=(9, max(4, len(labels) * 0.55)))
+    bars = ax.barh(range(len(labels)), counts, color=colors,
+                   edgecolor="white", linewidth=0.8, height=0.65)
+    for bar, cnt in zip(bars, counts):
+        pct = cnt / total * 100
+        ax.text(bar.get_width() + total * 0.005,
+                bar.get_y() + bar.get_height() / 2,
+                f"{cnt:,}  ({pct:.1f}%)", va="center", ha="left", fontsize=9)
+
+    ax.set_yticks(range(len(labels)))
+    ax.set_yticklabels(labels, fontsize=10)
+    ax.set_xlabel("Number of Images", fontsize=11, fontweight="bold")
+    ax.set_title(
+        f"Dataset Class Distribution  (total = {total:,} images)\n"
+        "PlantVillage — Tomato leaf subset",
+        fontsize=13, fontweight="bold",
+    )
+    ax.set_xlim(0, max(counts) * 1.22)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(axis="x", ls="--", alpha=0.3)
+    ax.axvline(total / len(labels), ls=":", color="grey",
+               linewidth=1.2, label="Balanced mean")
+    ax.legend(fontsize=9, frameon=False)
+    plt.tight_layout()
+    _save(fig, save_path)
+
+
+def plot_per_class_metrics(model, val_loader, class_names: list,
+                            device, save_path: str) -> None:
+    """
+    Grouped bar chart of Precision, Recall, and F1-score per class.
+    Highlights which disease categories the model struggles with — essential
+    for a credible evaluation chapter.
+    """
+    all_preds, all_labels = [], []
+    model.eval()
+    with torch.no_grad():
+        for inputs, labels in val_loader:
+            inputs = inputs.to(device)
+            preds  = torch.argmax(model(inputs), dim=1).cpu().numpy()
+            all_preds.extend(preds)
+            all_labels.extend(labels.numpy())
+
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        all_labels, all_preds,
+        labels=list(range(len(class_names))), zero_division=0,
+    )
+    short_names = [c.replace("Tomato___", "").replace("_", " ")
+                   for c in class_names]
+    x = np.arange(len(short_names))
+    w = 0.27
+
+    fig, ax = plt.subplots(figsize=(max(10, len(class_names) * 1.1), 5.5))
+    b1 = ax.bar(x - w, precision * 100, w, label="Precision",
+                color="#3A86FF", edgecolor="white", linewidth=0.8, alpha=0.88)
+    b2 = ax.bar(x,     recall    * 100, w, label="Recall",
+                color="#FF006E", edgecolor="white", linewidth=0.8, alpha=0.88)
+    b3 = ax.bar(x + w, f1        * 100, w, label="F1-Score",
+                color="#8338EC", edgecolor="white", linewidth=0.8, alpha=0.88)
+
+    for group in (b1, b2, b3):
+        for bar in group:
+            h = bar.get_height()
+            if h > 5:
+                ax.text(bar.get_x() + bar.get_width() / 2, h + 0.8,
+                        f"{h:.0f}", ha="center", va="bottom", fontsize=7)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(short_names, rotation=40, ha="right", fontsize=9)
+    ax.set_ylabel("Score (%)", fontsize=11, fontweight="bold")
+    ax.set_ylim(0, 115)
+    ax.set_title("Per-Class Metrics — Precision, Recall & F1-Score",
+                 fontsize=13, fontweight="bold")
+    ax.legend(fontsize=10, frameon=False)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(axis="y", ls="--", alpha=0.3)
+    ax.axhline(80, ls=":", color="grey", linewidth=1)
+    plt.tight_layout()
+    _save(fig, save_path)
+
+
+def plot_violin_latency(raw_df, model_name: str, save_path: str) -> None:
+    """
+    Violin plot of per-method latency distributions.
+    Reveals bimodality and tail behaviour better than a plain box plot.
+    """
+    methods = list(raw_df["Method"].unique())
+    data    = [raw_df[raw_df["Method"] == m]["Latency (s)"].values
+               for m in methods]
+    colors  = [_method_color(m, i) for i, m in enumerate(methods)]
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    parts = ax.violinplot(data, positions=range(1, len(methods) + 1),
+                          showmedians=True, showextrema=True, widths=0.55)
+    for pc, col in zip(parts["bodies"], colors):
+        pc.set_facecolor(col); pc.set_alpha(0.55); pc.set_edgecolor(col)
+    parts["cmedians"].set_color("white"); parts["cmedians"].set_linewidth(2)
+    for k in ("cmins", "cmaxes", "cbars"):
+        parts[k].set_color("grey")
+
+    for i, (m, col) in enumerate(zip(methods, colors)):
+        y = raw_df[raw_df["Method"] == m]["Latency (s)"].values
+        x = np.random.normal(i + 1, 0.04, size=len(y))
+        ax.scatter(x, y, color=col, s=22, alpha=0.75,
+                   edgecolors="black", linewidths=0.4, zorder=5)
+
+    ax.set_yscale("log")
+    ax.set_xticks(range(1, len(methods) + 1))
+    ax.set_xticklabels(methods, fontsize=11)
+    ax.set_ylabel("Latency (s) — Log Scale", fontsize=11, fontweight="bold")
+    ax.set_title(
+        f"{model_name.replace('_', ' ').title()} — Latency Distribution (Violin)\n"
+        "Kernel density + median + individual run points",
+        fontsize=12, fontweight="bold",
+    )
+    ax.grid(axis="y", which="both", ls="--", alpha=0.3)
+    ax.spines[["top", "right"]].set_visible(False)
+    plt.tight_layout()
+    _save(fig, save_path)
+
+
+def plot_throughput_bar(raw_df, model_name: str, save_path: str) -> None:
+    """
+    Bar chart of mean inference throughput (samples/second) per XAI method.
+    """
+    methods = list(raw_df["Method"].unique())
+    throughputs, errors = [], []
+    for m in methods:
+        lats = raw_df[raw_df["Method"] == m]["Latency (s)"].values
+        tps  = 1.0 / lats
+        throughputs.append(tps.mean())
+        errors.append(tps.std())
+
+    colors = [_method_color(m, i) for i, m in enumerate(methods)]
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    bars = ax.bar(methods, throughputs, color=colors, edgecolor="white",
+                  linewidth=1.0, width=0.55, alpha=0.88,
+                  yerr=errors, capsize=5,
+                  error_kw=dict(ecolor="black", elinewidth=1.2, capthick=1.2))
+    for bar, tp in zip(bars, throughputs):
+        ax.text(bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + max(errors) * 0.08,
+                f"{tp:.2f}", ha="center", va="bottom",
+                fontsize=10, fontweight="bold")
+    ax.set_ylabel("Throughput (samples / second)", fontsize=11, fontweight="bold")
+    ax.set_title(
+        f"{model_name.replace('_', ' ').title()} — XAI Method Throughput\n"
+        "(mean ± std  —  higher is faster)",
+        fontsize=12, fontweight="bold",
+    )
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(axis="y", ls="--", alpha=0.3)
+    ax.tick_params(axis="x", labelsize=11)
+    ax.set_ylim(0, max(throughputs) * 1.3)
+    plt.tight_layout()
+    _save(fig, save_path)
+
+
+def plot_ram_efficiency(raw_df, model_name: str, save_path: str) -> None:
+    """
+    Bar chart of RAM cost per unit latency (MB·s) — efficiency ratio.
+    """
+    methods = list(raw_df["Method"].unique())
+    ratios, labels_list = [], []
+    for m in methods:
+        sub  = raw_df[raw_df["Method"] == m]
+        eff  = (sub["Peak RAM (MB)"].values * sub["Latency (s)"].values).mean()
+        ratios.append(eff); labels_list.append(m)
+
+    colors = [_method_color(m, i) for i, m in enumerate(methods)]
+    order  = np.argsort(ratios)
+    ratios      = [ratios[i]      for i in order]
+    labels_list = [labels_list[i] for i in order]
+    colors      = [colors[i]      for i in order]
+
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    bars = ax.barh(range(len(labels_list)), ratios, color=colors,
+                   edgecolor="white", linewidth=0.8, height=0.55, alpha=0.88)
+    for bar, r in zip(bars, ratios):
+        ax.text(bar.get_width() + max(ratios) * 0.01,
+                bar.get_y() + bar.get_height() / 2,
+                f"{r:.3f} MB·s", va="center", ha="left",
+                fontsize=9, fontweight="bold")
+    ax.set_yticks(range(len(labels_list)))
+    ax.set_yticklabels(labels_list, fontsize=11)
+    ax.set_xlabel("Mean RAM × Latency (MB·s)  —  lower is better",
+                  fontsize=11, fontweight="bold")
+    ax.set_title(
+        f"{model_name.replace('_', ' ').title()} — Computational Efficiency Ratio\n"
+        "RAM cost per unit explanation time",
+        fontsize=12, fontweight="bold",
+    )
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(axis="x", ls="--", alpha=0.3)
+    ax.set_xlim(0, max(ratios) * 1.25)
+    plt.tight_layout()
+    _save(fig, save_path)
+
+
+def plot_method_radar(raw_df, model_name: str, save_path: str) -> None:
+    """
+    Radar (spider) chart comparing XAI methods across four normalised
+    cost dimensions: latency, RAM, VRAM, and CV stability.
+    """
+    methods = list(raw_df["Method"].unique())
+    stats = {}
+    for m in methods:
+        sub  = raw_df[raw_df["Method"] == m]
+        lat  = sub["Latency (s)"].values
+        ram  = sub["Peak RAM (MB)"].values
+        vram = sub["Peak VRAM (MB)"].values
+        cv   = lat.std() / lat.mean() if lat.mean() > 0 else 0.0
+        stats[m] = {"Latency": lat.mean(), "Peak RAM": ram.mean(),
+                    "Peak VRAM": vram.mean(), "CV (stability)": cv}
+
+    categories = ["Latency", "Peak RAM", "Peak VRAM", "CV (stability)"]
+    N       = len(categories)
+    cat_max = {c: max(stats[m][c] for m in methods) or 1.0 for c in categories}
+    angles  = [n / float(N) * 2 * np.pi for n in range(N)] +               [0 / float(N) * 2 * np.pi]
+
+    fig, ax = plt.subplots(figsize=(6, 6), subplot_kw=dict(polar=True))
+    for i, m in enumerate(methods):
+        color  = _method_color(m, i)
+        values = [stats[m][c] / cat_max[c] for c in categories]
+        values += [values[0]]
+        ax.plot(angles, values, "o-", linewidth=2, color=color,
+                label=m, markersize=5)
+        ax.fill(angles, values, alpha=0.12, color=color)
+
+    ax.set_theta_offset(np.pi / 2)
+    ax.set_theta_direction(-1)
+    ax.set_thetagrids(np.degrees(angles[:-1]), categories, fontsize=10)
+    ax.set_ylim(0, 1)
+    ax.set_yticks([0.25, 0.5, 0.75, 1.0])
+    ax.set_yticklabels(["25%", "50%", "75%", "100%"], fontsize=7, color="grey")
+    ax.grid(color="grey", ls="--", alpha=0.4)
+    ax.set_title(
+        f"{model_name.replace('_', ' ').title()} — XAI Method Radar\n"
+        "(normalised cost — outer = higher cost)",
+        fontsize=12, fontweight="bold", pad=18,
+    )
+    ax.legend(loc="upper right", bbox_to_anchor=(1.35, 1.15),
+              fontsize=10, frameon=False)
+    plt.tight_layout()
+    _save(fig, save_path)
+
+
+def plot_cumulative_time(raw_df, model_name: str, save_path: str) -> None:
+    """
+    Cumulative explanation time over sequential runs.
+    Shows the total time-budget required for N explanations.
+    """
+    methods = list(raw_df["Method"].unique())
+    fig, ax = plt.subplots(figsize=(9, 5))
+    for i, m in enumerate(methods):
+        color = _method_color(m, i)
+        sub   = raw_df[raw_df["Method"] == m].sort_values("Run")
+        cum   = np.cumsum(sub["Latency (s)"].values)
+        runs  = sub["Run"].values
+        ax.plot(runs, cum, "o-", color=color, linewidth=2.2,
+                markersize=5, label=m, alpha=0.88)
+        ax.annotate(f"{cum[-1]:.2f}s", (runs[-1], cum[-1]),
+                    textcoords="offset points", xytext=(6, 2),
+                    fontsize=9, fontweight="bold", color=color)
+    ax.set_xlabel("Run Index", fontsize=11, fontweight="bold")
+    ax.set_ylabel("Cumulative Explanation Time (s)", fontsize=11, fontweight="bold")
+    ax.set_title(
+        f"{model_name.replace('_', ' ').title()} — Cumulative Time Budget\n"
+        "Total wall-clock cost of N sequential XAI explanations",
+        fontsize=12, fontweight="bold",
+    )
+    ax.legend(fontsize=10, frameon=False)
+    ax.grid(ls="--", alpha=0.3)
+    ax.spines[["top", "right"]].set_visible(False)
+    plt.tight_layout()
+    _save(fig, save_path)
+
+
+def plot_cross_model_comparison(
+    report_paths: dict,
+    metric: str = "Latency Mean (s)",
+    save_path: str = "phase_5_evaluation/results/cross_model_latency_comparison.png",
+) -> None:
+    """
+    Grouped bar chart comparing an aggregated metric across multiple models.
+    Essential for the model-comparison section — which backbone has lower XAI overhead?
+
+    Parameters
+    ----------
+    report_paths : Dict  model_name -> path to *_benchmark_report.csv
+    metric       : Column name in the CSV to compare.
+    save_path    : Output PNG path.
+    """
+    import pandas as pd
+
+    model_dfs = {}
+    for model_name, path in report_paths.items():
+        if os.path.exists(path):
+            model_dfs[model_name] = pd.read_csv(path)
+        else:
+            print(f"  [skip] {path} not found — run that model first.")
+
+    if len(model_dfs) < 2:
+        print("  [skip] Need >= 2 model reports for cross-model comparison.")
+        return
+
+    all_methods = list(next(iter(model_dfs.values()))["Method"].tolist())
+    n_models    = len(model_dfs)
+    x = np.arange(len(all_methods))
+    w = 0.8 / n_models
+    model_colors = ["#3A86FF", "#FF006E", "#8338EC", "#FFBE0B"]
+
+    fig, ax = plt.subplots(figsize=(max(8, len(all_methods) * 1.4), 5.5))
+    for j, (model_name, df) in enumerate(model_dfs.items()):
+        vals = []
+        for m in all_methods:
+            row = df[df["Method"] == m]
+            vals.append(float(row[metric].values[0]) if len(row) else 0.0)
+        color  = model_colors[j % len(model_colors)]
+        offset = (j - n_models / 2 + 0.5) * w
+        bars = ax.bar(x + offset, vals, w,
+                      label=model_name.replace("_", " ").title(),
+                      color=color, edgecolor="white", linewidth=0.8, alpha=0.88)
+        for bar, v in zip(bars, vals):
+            ax.text(bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() * 1.02,
+                    f"{v:.4f}" if v < 1 else f"{v:.1f}",
+                    ha="center", va="bottom", fontsize=8, fontweight="bold")
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(all_methods, fontsize=11)
+    ax.set_ylabel(metric, fontsize=11, fontweight="bold")
+    ax.set_title(
+        f"Cross-Model Comparison — {metric}\n"
+        "MobileNetV3 vs ShuffleNetV2 per XAI method",
+        fontsize=13, fontweight="bold",
+    )
+    ax.legend(fontsize=11, frameon=False)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(axis="y", ls="--", alpha=0.3)
+    plt.tight_layout()
+    _save(fig, save_path)
